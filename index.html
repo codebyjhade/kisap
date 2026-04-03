@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ODZ Booth</title>
+    
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&family=Fredoka:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+
+    <script defer src="script.js"></script> 
+</head>
+<body>
+
+    <header class="main-header">
+        <div class="container">
+            <div class="logo">
+                <h1 class="title">ODZ <span class="booth">BOOTH</span></h1>
+            </div>
+            <nav class="main-nav">
+                <a href="#about-section" class="nav-link">About</a>
+                <a href="portfolio.html" class="nav-link">Portfolio</a>
+                <a href="#contact-section" class="nav-link">Contact</a>
+            </nav>
+            <button id="fullscreenToggle" class="fullscreen-btn" title="Toggle Fullscreen">
+                <i class='bx bx-fullscreen'></i>
+            </button>
+        </div>
+    </header>
+
+    <main class="hero-section">
+        <div class="container">
+            <h3 class="welcome">WELCOME TO</h3>
+            <h1 class="hero-title">ODZ <span class="booth">BOOTH</span></h1>
+            <p class="hero-subtitle">Capture, Customize, Create! Your ultimate digital photo booth experience.</p>
+
+            <div class="buttons">
+                <button id="startSessionBtn" class="start-btn">
+                    <i class='bx bx-camera'></i> Start Your Session
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <section id="about-section" class="info-section about-section">
+        <div class="container">
+            <h2>About ODZ Booth</h2>
+            <p>ODZ Booth is a fun and interactive digital photo booth experience designed to capture your special moments. From quick snaps to creative edits, we provide all the tools you need to create unique photo strips you'll love. Get ready to express yourself and make unforgettable memories!</p>
+            <p>We believe in simple, accessible fun for everyone. No complicated setups, just pure creativity at your fingertips.</p>
+        </div>
+    </section>
+
+    <section id="contact-section" class="info-section contact-section">
+        <div class="container">
+            <h2>Contact Us</h2>
+            <p>Have questions or feedback? We'd love to hear from you!</p>
+            <p>Email: <a href="mailto:info@odzbooth.com">info@odzbooth.com</a></p>
+            <p>Follow us on social media: [Link to Facebook] [Link to Instagram]</p>
+            <p>Location: Pan Philippine Highway, Alicia, San Antonio, 3306, Isabela</p>
+        </div>
+    </section>
+
+    <!-- Chatbot Widget Button -->
+    <div id="chatbotToggle" class="chatbot-toggle" title="Chat with AI Assistant">
+        <i class='bx bx-chat-left-dots'></i>
+    </div>
+
+    <!-- Chatbot Widget Container -->
+    <div id="chatbotWidget" class="chatbot-widget hidden">
+        <div class="chatbot-header">
+            <h3>🤖 AI Assistant</h3>
+            <button id="chatbotClose" class="chatbot-close-btn">
+                <i class='bx bx-x'></i>
+            </button>
+        </div>
+        <div class="chatbot-messages" id="chatbotMessages">
+            <div class="chat-message assistant">
+                <p>Hi! 👋 I'm Bryan's AI Assistant. Ask me about his projects, skills, or expertise!</p>
+            </div>
+        </div>
+        <div class="chatbot-input">
+            <input type="text" id="chatbotInput" placeholder="Ask me something...">
+            <button id="chatbotSend" class="chatbot-send-btn">
+                <i class='bx bx-send'></i>
+            </button>
+        </div>
+    </div>
+
+    <footer class="main-footer">
+        <div class="container">
+            <p>&copy; 2024 ODZ Booth. All rights reserved. Developed by @itsbryanjhade</p>
+        </div>
+    </footer>
+
+    <script src="chatbot-widget.js"></script>
+</body>
+</html>
