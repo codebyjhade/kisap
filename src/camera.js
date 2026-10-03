@@ -1,3 +1,5 @@
+import { createCompatibleVideoRecorder, startVideoRecorder } from "./media-recorder.js";
+
 const GIF_WIDTH = 360;
 const GIF_HEIGHT = 240;
 const GIF_INTERVAL = 250;
@@ -71,7 +73,7 @@ export function stopCamera() {
   isCapturing = false;
 }
 
-export async function captureMoment(video, { onTick, onEncoding, signal } = {}) {
+export async function captureMoment(video, { onTick, onFinalStill, onEncoding, signal } = {}) {
   if (!video || isCapturing) {
     throw new Error("The camera is not ready yet.");
   }
@@ -93,10 +95,19 @@ export async function captureMoment(video, { onTick, onEncoding, signal } = {}) 
   isCapturing = true;
 
   const stream = video.srcObject;
-  const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+  const recorder = createCompatibleVideoRecorder(stream, 6_000_000);
   const chunks = [];
-  recorder.ondataavailable = (e) => chunks.push(e.data);
-  recorder.start();
+  recorder.ondataavailable = (event) => {
+    if (event.data?.size) chunks.push(event.data);
+  };
+  const recordingPromise = new Promise((resolve, reject) => {
+    recorder.onstop = () => resolve(new Blob(chunks, {
+      type: recorder.mimeType || chunks[0]?.type || "video/webm",
+    }));
+    recorder.onerror = (event) => reject(event.error || new Error("Camera recording failed."));
+  });
+  recordingPromise.catch(() => {});
+  await startVideoRecorder(recorder);
 
   let secondsLeft = 10;
   onTick?.(secondsLeft);
@@ -112,16 +123,15 @@ export async function captureMoment(video, { onTick, onEncoding, signal } = {}) 
     recorder.stop();
     
     if (signal?.aborted) throw new DOMException("Capture cancelled.", "AbortError");
-    
-    const videoBlob = await new Promise((resolve) => {
-      recorder.onstop = () => resolve(new Blob(chunks, { type: "video/webm" }));
-    });
-    
+    await onFinalStill?.();
+    if (signal?.aborted) throw new DOMException("Capture cancelled.", "AbortError");
     const stillBlob = await captureStill(video);
     onEncoding?.();
+    const videoBlob = await recordingPromise;
     return { stillBlob, videoBlob };
   } finally {
     window.clearInterval(countdownTimer);
+    if (recorder.state !== "inactive") recorder.stop();
     isCapturing = false;
   }
 }

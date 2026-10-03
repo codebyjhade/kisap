@@ -6,6 +6,11 @@ import {
   startCamera,
   stopCamera,
 } from "./camera.js";
+import {
+  createCompatibleVideoRecorder,
+  recorderFileExtension,
+  startVideoRecorder,
+} from "./media-recorder.js";
 
 const SCREEN_ORDER = ["home", "capture", "review", "edit", "finish"];
 const STICKER_CATALOG = [
@@ -39,9 +44,79 @@ const appState = {
   selectedStickerId: null,
   cameras: [],
   selectedCameraId: null,
+  busy: false,
+  soundEnabled: true,
+  flashEnabled: true,
 };
 
 let captureController = null;
+let feedbackAudioContext = null;
+
+function getFeedbackAudioContext() {
+  if (!appState.soundEnabled) return null;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  try {
+    feedbackAudioContext ||= new AudioContextClass();
+  } catch {
+    return null;
+  }
+  if (feedbackAudioContext.state === "suspended") feedbackAudioContext.resume().catch(() => {});
+  return feedbackAudioContext;
+}
+
+function playTone(frequency, duration, { gain = 0.035, delay = 0, type = "sine" } = {}) {
+  const audio = getFeedbackAudioContext();
+  if (!audio) return;
+  const start = audio.currentTime + delay;
+  const oscillator = audio.createOscillator();
+  const volume = audio.createGain();
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(frequency, start);
+  volume.gain.setValueAtTime(0.0001, start);
+  volume.gain.exponentialRampToValueAtTime(gain, start + 0.008);
+  volume.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  oscillator.connect(volume).connect(audio.destination);
+  oscillator.start(start);
+  oscillator.stop(start + duration + 0.02);
+}
+
+function playCountdownTick(seconds) {
+  if (seconds < 1 || seconds > 3) return;
+  playTone(seconds === 1 ? 1040 : 820, 0.07, { gain: 0.025, type: "triangle" });
+}
+
+function playShutterSound() {
+  const audio = getFeedbackAudioContext();
+  if (!audio) return;
+  const sampleCount = Math.max(1, Math.round(audio.sampleRate * 0.11));
+  const buffer = audio.createBuffer(1, sampleCount, audio.sampleRate);
+  const samples = buffer.getChannelData(0);
+  for (let index = 0; index < sampleCount; index += 1) {
+    const envelope = Math.exp(-index / (sampleCount * 0.16));
+    samples[index] = (Math.random() * 2 - 1) * envelope;
+  }
+  const source = audio.createBufferSource();
+  const filter = audio.createBiquadFilter();
+  const volume = audio.createGain();
+  filter.type = "bandpass";
+  filter.frequency.value = 1450;
+  filter.Q.value = 0.75;
+  volume.gain.value = 0.055;
+  source.buffer = buffer;
+  source.connect(filter).connect(volume).connect(audio.destination);
+  source.start();
+  playTone(190, 0.055, { gain: 0.025, type: "square" });
+}
+
+function playReadyChime() {
+  playTone(660, 0.18, { gain: 0.026, type: "sine" });
+  playTone(880, 0.26, { gain: 0.022, delay: 0.11, type: "sine" });
+}
+
+function vibrate(pattern) {
+  if (typeof navigator.vibrate === "function") navigator.vibrate(pattern);
+}
 
 function getInitialScreen() {
   const requested = window.location.hash.replace("#", "");
@@ -143,9 +218,9 @@ function stripDiagram({ duplicate = true, usePhotos = true, editable = false } =
   const frames = Array.from({ length: 4 }, (_, index) => diagramFrame(index, usePhotos)).join("");
   
   const buildStrip = (isHidden, isInteractive) => `
-    <div class="strip-diagram" ${isHidden ? 'aria-hidden="true"' : ''}>
+    <div class="strip-diagram strip-diagram--kisap" ${isHidden ? 'aria-hidden="true"' : ''}>
       <div class="strip-deco-top">kisap. // ARCHIVE 01</div>
-      <div class="strip-deco-vertical">A MOMENT, STILL MOVING</div>
+      <div class="strip-deco-vertical">KISAP / FOUR MOMENTS / 10S EACH</div>
       <div class="diagram-column">
         ${frames}
         ${stickerLayer(isInteractive)}
@@ -226,7 +301,7 @@ function homeScreen() {
             <div class="feature-card reveal" style="transition-delay: 0.2s">
               <div class="feature-icon">03</div>
               <h3>Personalize</h3>
-              <p>Add stickers, change backgrounds, and apply filters. Every edit is mirrored perfectly to your dual strip.</p>
+              <p>Add stickers, change backgrounds, and apply filters. Your complete Kisap strip is repeated exactly for the photo download.</p>
             </div>
           </div>
         </div>
@@ -263,21 +338,37 @@ function homeScreen() {
   `;
 }
 
+function escapeHtml(value = "") {
+  return String(value).replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character]);
+}
+
+function cameraPickerMarkup(active) {
+  if (!active || !appState.cameras.length) return "";
+  return `
+    <label class="camera-picker">
+      <span>Camera</span>
+      <select data-camera-select aria-label="Choose camera" ${appState.busy ? "disabled" : ""}>
+        ${appState.cameras.map((camera, index) => `
+          <option value="${escapeHtml(camera.deviceId)}" ${camera.deviceId === appState.selectedCameraId ? "selected" : ""}>
+            ${escapeHtml(camera.label || `Camera ${index + 1}`)}
+          </option>
+        `).join("")}
+      </select>
+    </label>
+  `;
+}
+
 function captureScreen() {
   const number = appState.activeMoment + 1;
   const active = cameraIsActive();
   const capturedCount = appState.moments.filter(Boolean).length;
   const actionLabel = active ? (appState.retaking ? `Retake moment ${number}` : `Capture moment ${number}`) : "Turn on camera";
-
-  const hasMultipleCameras = appState.cameras?.length > 1;
-  const cameraSwitcher = hasMultipleCameras && active && !appState.busy ? `
-    <button class="button button--ghost" data-switch-camera title="Switch Camera" aria-label="Switch Camera" style="padding: 0 16px;">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M20 16a6 6 0 1 1-16 0c0-3.3 2.7-6 6-6h14"></path>
-        <path d="m16 6 4 4-4 4"></path>
-      </svg>
-    </button>
-  ` : "";
 
   return `
     <main class="workflow-page page-shell">
@@ -290,6 +381,8 @@ function captureScreen() {
       </section>
       <section class="camera-stage ${active ? "camera-stage--live" : "camera-stage--inactive"}" aria-label="Camera preview">
         <video id="camera-feed" class="camera-feed" autoplay muted playsinline></video>
+        <div class="capture-flash" aria-hidden="true"></div>
+        <div class="capture-progress" aria-hidden="true"><span id="capture-progress-bar"></span></div>
         <div class="camera-message ${active ? "camera-message--ready" : ""}">
           <span id="capture-kicker">${active ? "Camera ready" : "Camera is off"}</span>
           <strong id="capture-countdown">${active ? "10" : "—"}</strong>
@@ -302,12 +395,15 @@ function captureScreen() {
           </div>
         </div>
       </section>
-      <div class="workflow-actions">
+      <div class="workflow-actions capture-controls" data-capture-controls>
         <button class="button button--ghost" data-nav="${capturedCount ? "review" : "home"}">${capturedCount ? "Back to review" : "Back"}</button>
-        <div style="display:flex; gap:12px; align-items:center;">
-          ${cameraSwitcher}
+        <div class="capture-control-bar">
+          <div data-camera-picker>${cameraPickerMarkup(active)}</div>
+          <button class="capture-option" data-toggle-sound aria-pressed="${appState.soundEnabled}" title="Toggle countdown sounds">Sound ${appState.soundEnabled ? "on" : "off"}</button>
+          <button class="capture-option" data-toggle-flash aria-pressed="${appState.flashEnabled}" title="Toggle screen flash">Flash ${appState.flashEnabled ? "on" : "off"}</button>
           <button class="button button--light" ${appState.busy ? "disabled" : ""} ${active ? "data-capture-moment" : "data-enable-camera"}>${actionLabel} <span aria-hidden="true">→</span></button>
         </div>
+        <p class="capture-shortcut">Press Space or Enter to capture · compatible remotes supported</p>
       </div>
     </main>
   `;
@@ -368,13 +464,13 @@ function editorScreen() {
       <section class="editor-preview">
         <div class="preview-label"><span>Live preview</span><span>1200 × 1800</span></div>
         ${stripDiagram({ editable: true })}
-        <p class="preview-help">Drag a selected sticker on the left strip. Every edit is mirrored to the right.</p>
+        <p class="preview-help">Edit the first strip. The second is an exact copy of the complete Kisap design.</p>
       </section>
       <aside class="editor-panel">
         <div>
           <p class="eyebrow">Make it yours</p>
           <h1>Keep it simple.</h1>
-          <p>Edits are applied once and mirrored perfectly across both strips.</p>
+          <p>Edits are applied once and repeated perfectly on both complete strips.</p>
         </div>
         <fieldset>
           <legend>Filter</legend>
@@ -416,9 +512,10 @@ function finishScreen() {
       <section class="finish-card">
         <p class="eyebrow">Your kisap</p>
         <h1>Made here.<br><em>Kept by you.</em></h1>
-        <p>Your four photos and GIFs are ready locally. Final strip rendering, downloads, and sharing arrive in the next phase.</p>
+        <p>Your four moments are ready. Keep one strip, download a seamless double, or save the animated version—everything stays on this device.</p>
         <div class="finish-actions">
-          <button class="button button--light" id="btn-download-photo">Download photo</button>
+          <button class="button button--light" id="btn-download-double">Download double strip</button>
+          <button class="button button--ghost" id="btn-download-single">Download single strip</button>
           <button class="button button--light" id="btn-download-motion">Download motion</button>
           <button class="button button--ghost" id="btn-share-photo" ${navigator.share ? "" : "style='display:none'"}>Share</button>
         </div>
@@ -458,10 +555,13 @@ function bindInteractions() {
   document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
 
   document.querySelector("[data-enable-camera]")?.addEventListener("click", enableCamera);
-  document.querySelector("[data-switch-camera]")?.addEventListener("click", switchCamera);
+  document.querySelector("[data-camera-select]")?.addEventListener("change", selectCamera);
   document.querySelector("[data-capture-moment]")?.addEventListener("click", runCapture);
+  document.querySelector("[data-toggle-sound]")?.addEventListener("click", toggleCaptureSound);
+  document.querySelector("[data-toggle-flash]")?.addEventListener("click", toggleCaptureFlash);
 
-  document.querySelector("#btn-download-photo")?.addEventListener("click", () => exportStrip("photo"));
+  document.querySelector("#btn-download-double")?.addEventListener("click", () => exportStrip("photo-double"));
+  document.querySelector("#btn-download-single")?.addEventListener("click", () => exportStrip("photo-single"));
   document.querySelector("#btn-download-motion")?.addEventListener("click", () => exportStrip("motion"));
   document.querySelector("#btn-share-photo")?.addEventListener("click", () => exportStrip("share"));
 
@@ -669,17 +769,15 @@ async function enableCamera() {
     const { startCamera, getAvailableCameras } = await import("./camera.js");
     await startCamera(document.querySelector("#camera-feed"), appState.selectedCameraId);
     
-    // Fetch cameras if we haven't yet, now that we have permissions
-    if (appState.cameras.length === 0) {
-      appState.cameras = await getAvailableCameras();
-      if (!appState.selectedCameraId && appState.cameras.length > 0) {
-        const track = document.querySelector("#camera-feed")?.srcObject?.getVideoTracks()[0];
-        if (track) {
-          const active = appState.cameras.find(c => c.label === track.label);
-          if (active) appState.selectedCameraId = active.deviceId;
-        }
-      }
-    }
+    // Refresh after permission so labels and newly connected cameras are available.
+    appState.cameras = await getAvailableCameras();
+    const track = document.querySelector("#camera-feed")?.srcObject?.getVideoTracks()[0];
+    const activeDeviceId = track?.getSettings?.().deviceId;
+    const activeCamera = appState.cameras.find((camera) => (
+      camera.deviceId === activeDeviceId || camera.label === track?.label
+    ));
+    if (activeCamera) appState.selectedCameraId = activeCamera.deviceId;
+    else if (!appState.selectedCameraId && appState.cameras.length) appState.selectedCameraId = appState.cameras[0].deviceId;
     
     appState.notice = "Camera ready. Your ten seconds begin when you press capture.";
     showCameraReady();
@@ -691,14 +789,14 @@ async function enableCamera() {
   render();
 }
 
-async function switchCamera() {
-  if (appState.cameras.length < 2) return;
-  const currentIndex = appState.cameras.findIndex(c => c.deviceId === appState.selectedCameraId);
-  const nextIndex = (currentIndex + 1) % appState.cameras.length;
-  appState.selectedCameraId = appState.cameras[nextIndex].deviceId;
-  
+async function selectCamera(event) {
+  if (appState.busy) return;
+  const nextDeviceId = event.currentTarget.value;
+  if (!nextDeviceId || nextDeviceId === appState.selectedCameraId) return;
+  appState.selectedCameraId = nextDeviceId;
+  event.currentTarget.disabled = true;
   const status = document.querySelector("#capture-status");
-  if (status) status.textContent = "Switching camera...";
+  if (status) status.textContent = "Switching to the selected camera…";
   
   try {
     const { startCamera } = await import("./camera.js");
@@ -708,6 +806,29 @@ async function switchCamera() {
     appState.cameraError = cameraErrorMessage(error);
     render();
   }
+}
+
+function updateCameraPicker() {
+  const host = document.querySelector("[data-camera-picker]");
+  if (!host) return;
+  host.innerHTML = cameraPickerMarkup(cameraIsActive());
+  host.querySelector("[data-camera-select]")?.addEventListener("change", selectCamera);
+}
+
+function toggleCaptureSound(event) {
+  appState.soundEnabled = !appState.soundEnabled;
+  event.currentTarget.setAttribute("aria-pressed", String(appState.soundEnabled));
+  event.currentTarget.textContent = `Sound ${appState.soundEnabled ? "on" : "off"}`;
+  if (appState.soundEnabled) {
+    getFeedbackAudioContext();
+    playTone(720, 0.08, { gain: 0.02, type: "triangle" });
+  }
+}
+
+function toggleCaptureFlash(event) {
+  appState.flashEnabled = !appState.flashEnabled;
+  event.currentTarget.setAttribute("aria-pressed", String(appState.flashEnabled));
+  event.currentTarget.textContent = `Flash ${appState.flashEnabled ? "on" : "off"}`;
 }
 
 function showCameraReady() {
@@ -729,6 +850,7 @@ function showCameraReady() {
   if (status) status.textContent = "Recording begins when you press capture.";
   if (recordingState) recordingState.textContent = "READY · 10 SEC";
   if (privacy) privacy.innerHTML = '<span class="privacy-light privacy-light--live"></span> camera active · local only';
+  updateCameraPicker();
 
   if (button) {
     button.disabled = false;
@@ -740,16 +862,32 @@ function showCameraReady() {
   }
 }
 
+async function triggerFinalStillFeedback() {
+  setCaptureUi("still", 0);
+  playShutterSound();
+  vibrate([45, 30, 70]);
+  const flash = document.querySelector(".capture-flash");
+  if (!appState.flashEnabled || !flash) return;
+  flash.classList.add("is-visible");
+  await new Promise((resolve) => window.setTimeout(resolve, 100));
+  window.setTimeout(() => flash.classList.remove("is-visible"), 180);
+}
+
 async function runCapture() {
   if (appState.busy) return;
+  getFeedbackAudioContext();
   appState.busy = true;
   appState.cameraError = "";
   captureController = new AbortController();
+  document.querySelector("#app")?.classList.add("is-capturing");
+  document.querySelector("[data-capture-controls]")?.classList.add("capture-controls--hidden");
+  vibrate(35);
   setCaptureUi("recording", 10);
 
   try {
     const result = await captureMoment(document.querySelector("#camera-feed"), {
       onTick: (seconds) => setCaptureUi("recording", seconds),
+      onFinalStill: triggerFinalStillFeedback,
       onEncoding: () => setCaptureUi("encoding"),
       signal: captureController.signal,
     });
@@ -791,22 +929,36 @@ function setCaptureUi(mode, seconds = 10) {
   const kicker = document.querySelector("#capture-kicker");
   const recordingState = document.querySelector("#recording-state");
   const stage = document.querySelector(".camera-stage");
-  const button = document.querySelector("[data-capture-moment]");
+  const progress = document.querySelector("#capture-progress-bar");
 
-  if (button) button.disabled = true;
   if (mode === "recording") {
     stage?.classList.add("is-recording");
+    stage?.classList.remove("is-capturing-still", "is-encoding");
     if (countdown) countdown.textContent = String(seconds);
-    if (kicker) kicker.textContent = "Recording motion";
-    if (status) status.textContent = seconds ? "Keep moving. The final frame becomes your photo." : "Hold that moment.";
-    if (recordingState) recordingState.textContent = "REC · LOCAL GIF";
+    if (kicker) kicker.textContent = seconds <= 3 ? "Final photo" : "Recording motion";
+    if (status) status.textContent = seconds > 3
+      ? "Keep moving—your ten-second motion is recording."
+      : seconds > 0 ? `Final still in ${seconds}. Hold your pose.` : "Capturing your final still.";
+    if (recordingState) recordingState.textContent = seconds <= 3 ? `STILL IN ${seconds}` : "REC · MOTION";
+    if (progress) progress.style.width = `${(10 - seconds) * 10}%`;
+    playCountdownTick(seconds);
+  } else if (mode === "still") {
+    stage?.classList.remove("is-recording", "is-encoding");
+    stage?.classList.add("is-capturing-still");
+    if (countdown) countdown.textContent = "●";
+    if (kicker) kicker.textContent = "Photo captured";
+    if (status) status.textContent = "That final frame is your still photo.";
+    if (recordingState) recordingState.textContent = "STILL · CAPTURED";
+    if (progress) progress.style.width = "100%";
   } else {
     stage?.classList.remove("is-recording");
+    stage?.classList.remove("is-capturing-still");
     stage?.classList.add("is-encoding");
     if (countdown) countdown.textContent = "···";
     if (kicker) kicker.textContent = "Saving your moment";
-    if (status) status.textContent = "Creating the GIF on this device.";
+    if (status) status.textContent = "Saving the photo and motion locally.";
     if (recordingState) recordingState.textContent = "ENCODING · LOCAL";
+    if (progress) progress.style.width = "100%";
   }
 }
 
@@ -853,6 +1005,7 @@ function cameraErrorMessage(error) {
 
 function render() {
   const app = document.querySelector("#app");
+  app.classList.remove("is-capturing");
   app.dataset.screen = appState.screen;
   app.dataset.filter = appState.filter;
   app.dataset.background = appState.background;
@@ -866,7 +1019,7 @@ function render() {
       ${screens[appState.screen]()}
       <footer class="site-footer">
         <span>kisap. / private web photo booth</span>
-        <span>phase 03 · personalise & preview</span>
+        <span>phase 03 · capture experience</span>
       </footer>
     `;
   }
@@ -899,175 +1052,318 @@ window.addEventListener("beforeunload", () => {
   appState.moments.forEach(releaseMoment);
 });
 
+const EXPORT_LAYOUT = Object.freeze({
+  height: 1800,
+  doubleWidth: 1200,
+  singleWidth: 600,
+  stripWidth: 600,
+  stripHeight: 1800,
+  stripY: 0,
+  doubleStripX: [0, 600],
+  singleStripX: [0],
+  photoInset: 36,
+  photoStartY: 49,
+  photoWidth: 528,
+  photoHeight: 353,
+  photoGap: 24,
+  footerGap: 24,
+});
+const MOTION_EXPORT_FPS = 24;
+const MOTION_EXPORT_BITRATE = 12_000_000;
+
+const EXPORT_COLORS = Object.freeze({
+  black: "#0b0b0b",
+  paper: "#f4f1ea",
+  red: "#9e312b",
+  blue: "#26364a",
+  sage: "#66705f",
+});
+
+const EXPORT_FRAME_COLORS = Object.freeze({
+  original: "#050505",
+  mono: "#2b2b29",
+  warm: "#554940",
+  cool: "#3c4650",
+  vintage: "#4b4839",
+});
+
+const EXPORT_FILTERS = Object.freeze({
+  original: "none",
+  mono: "grayscale(100%) contrast(105%)",
+  warm: "sepia(30%) saturate(118%) contrast(102%)",
+  cool: "saturate(82%) hue-rotate(174deg) contrast(104%)",
+  vintage: "sepia(58%) saturate(82%) contrast(92%)",
+});
+
+let exportFontsReady;
+
+function waitForExportFonts() {
+  exportFontsReady ||= document.fonts?.ready || Promise.resolve();
+  return exportFontsReady;
+}
+
+function loadCanvasImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("A captured photo could not be loaded for export."));
+    image.src = src;
+  });
+}
+
+async function resolveExportMedia(mediaElements) {
+  if (mediaElements) return mediaElements;
+  return Promise.all(appState.moments.map((moment) => (
+    moment?.stillUrl ? loadCanvasImage(moment.stillUrl) : Promise.resolve(null)
+  )));
+}
+
+function drawMediaCover(ctx, media, x, y, width, height) {
+  const sourceWidth = media.videoWidth || media.naturalWidth || media.width;
+  const sourceHeight = media.videoHeight || media.naturalHeight || media.height;
+  if (!sourceWidth || !sourceHeight) return;
+
+  const sourceRatio = sourceWidth / sourceHeight;
+  const targetRatio = width / height;
+  let sx = 0;
+  let sy = 0;
+  let sw = sourceWidth;
+  let sh = sourceHeight;
+
+  if (sourceRatio > targetRatio) {
+    sw = sourceHeight * targetRatio;
+    sx = (sourceWidth - sw) / 2;
+  } else {
+    sh = sourceWidth / targetRatio;
+    sy = (sourceHeight - sh) / 2;
+  }
+
+  if (media.tagName === "VIDEO") {
+    ctx.save();
+    ctx.translate(x + width, y);
+    ctx.scale(-1, 1);
+    ctx.drawImage(media, sx, sy, sw, sh, 0, 0, width, height);
+    ctx.restore();
+    return;
+  }
+  ctx.drawImage(media, sx, sy, sw, sh, x, y, width, height);
+}
+
+function drawSpacedText(ctx, text, x, y, spacing) {
+  let cursor = x;
+  for (const character of text) {
+    ctx.fillText(character, cursor, y);
+    cursor += ctx.measureText(character).width + spacing;
+  }
+}
+
+function measureSpacedText(ctx, text, spacing) {
+  return Array.from(text).reduce((width, character, index) => (
+    width + ctx.measureText(character).width + (index ? spacing : 0)
+  ), 0);
+}
+
+function drawPaperTexture(ctx, stripX, isPaper) {
+  const { stripWidth, stripHeight, stripY } = EXPORT_LAYOUT;
+  const sheen = ctx.createLinearGradient(stripX, stripY, stripX + stripWidth, stripY + stripHeight * 0.25);
+  sheen.addColorStop(0, isPaper ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.035)");
+  sheen.addColorStop(0.28, "rgba(255,255,255,0.008)");
+  sheen.addColorStop(0.55, "rgba(255,255,255,0)");
+  sheen.addColorStop(1, isPaper ? "rgba(0,0,0,0.025)" : "rgba(0,0,0,0.11)");
+  ctx.fillStyle = sheen;
+  ctx.fillRect(stripX, stripY, stripWidth, stripHeight);
+
+  let seed = 19;
+  ctx.save();
+  ctx.fillStyle = isPaper ? "rgba(11,11,11,0.035)" : "rgba(255,255,255,0.025)";
+  for (let index = 0; index < 72; index += 1) {
+    seed = (seed * 16807) % 2147483647;
+    const x = stripX + (seed / 2147483647) * stripWidth;
+    seed = (seed * 16807) % 2147483647;
+    const y = stripY + (seed / 2147483647) * stripHeight;
+    const size = index % 5 === 0 ? 1.2 : 0.7;
+    ctx.fillRect(x, y, size, size);
+  }
+  ctx.restore();
+
+}
+
+function drawExportFrame(ctx, media, index, x, y) {
+  const { photoWidth, photoHeight } = EXPORT_LAYOUT;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, photoWidth, photoHeight);
+  ctx.clip();
+  ctx.fillStyle = EXPORT_FRAME_COLORS[appState.filter] || EXPORT_FRAME_COLORS.original;
+  ctx.fillRect(x, y, photoWidth, photoHeight);
+
+  if (media) {
+    ctx.filter = EXPORT_FILTERS[appState.filter] || EXPORT_FILTERS.original;
+    drawMediaCover(ctx, media, x, y, photoWidth, photoHeight);
+    ctx.filter = "none";
+  }
+
+  ctx.shadowColor = "rgba(0,0,0,0.45)";
+  ctx.shadowBlur = 5;
+  ctx.shadowOffsetY = 1;
+  ctx.font = '500 16px "DM Mono", Consolas, monospace';
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  ctx.fillStyle = "rgba(244,241,234,0.72)";
+  ctx.fillText(String(index + 1).padStart(2, "0"), x + 29, y + photoHeight - 29);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#6f6d67";
+  ctx.fillText(media ? "captured" : "moment", x + photoWidth - 29, y + photoHeight - 29);
+  ctx.restore();
+}
+
+function drawExportStrip(ctx, stripX, mediaElements) {
+  const layout = EXPORT_LAYOUT;
+  const stripBottom = layout.stripY + layout.stripHeight;
+  const photoX = stripX + layout.photoInset;
+  const photoY = layout.stripY + layout.photoStartY;
+  const photoStackHeight = layout.photoHeight * 4 + layout.photoGap * 3;
+  const footerY = photoY + photoStackHeight + layout.footerGap;
+  const footerHeight = stripBottom - footerY;
+  const isPaper = appState.background === "paper";
+
+  if (!appState.background || appState.background === "black") {
+    const background = ctx.createLinearGradient(0, layout.stripY, 0, stripBottom);
+    background.addColorStop(0, "#121212");
+    background.addColorStop(1, "#040404");
+    ctx.fillStyle = background;
+  } else {
+    ctx.fillStyle = EXPORT_COLORS[appState.background] || EXPORT_COLORS.black;
+  }
+  ctx.fillRect(stripX, layout.stripY, layout.stripWidth, layout.stripHeight);
+  drawPaperTexture(ctx, stripX, isPaper);
+
+  Array.from({ length: 4 }, (_, index) => mediaElements[index] || null).forEach((media, index) => {
+    const frameY = photoY + index * (layout.photoHeight + layout.photoGap);
+    drawExportFrame(ctx, media, index, photoX, frameY);
+  });
+
+  ctx.save();
+  ctx.fillStyle = isPaper ? "rgba(0,0,0,0.3)" : "rgba(255,255,255,0.22)";
+  ctx.font = '400 13px "DM Mono", Consolas, monospace';
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  const sideText = "KISAP / FOUR MOMENTS / 10S EACH";
+  const sideTextWidth = measureSpacedText(ctx, sideText, 1.95);
+  ctx.translate(stripX + 18, photoY + (photoStackHeight + sideTextWidth) / 2);
+  ctx.rotate(-Math.PI / 2);
+  drawSpacedText(ctx, sideText, 0, 0, 1.95);
+  ctx.restore();
+
+  ctx.save();
+  ctx.textBaseline = "middle";
+  ctx.font = '600 22px "Manrope", Arial, sans-serif';
+  const baseText = "kisap";
+  const dotText = ".";
+  const baseWidth = ctx.measureText(baseText).width;
+  const dotWidth = ctx.measureText(dotText).width;
+  const stripCenter = stripX + layout.stripWidth / 2;
+  ctx.textAlign = "left";
+  ctx.fillStyle = isPaper ? "#0b0b0b" : "#f4f1ea";
+  const centeredBrandX = stripCenter - (baseWidth + dotWidth) / 2;
+  ctx.fillText(baseText, centeredBrandX, footerY + footerHeight / 2 - 24);
+  ctx.fillStyle = "#ff4d3d";
+  ctx.fillText(dotText, centeredBrandX + baseWidth, footerY + footerHeight / 2 - 24);
+  ctx.textAlign = "center";
+  ctx.font = '400 14px "DM Mono", Consolas, monospace';
+  ctx.fillStyle = isPaper ? "#0b0b0b" : "#aaa79f";
+  ctx.fillText(stripDate(), stripCenter, footerY + footerHeight / 2 + 31);
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(photoX, photoY, layout.photoWidth, photoStackHeight);
+  ctx.clip();
+  for (const sticker of appState.stickers) {
+    const stickerX = photoX + (sticker.x / 100) * layout.photoWidth;
+    const stickerY = photoY + (sticker.y / 100) * photoStackHeight;
+    const radius = 24 * sticker.scale;
+    ctx.beginPath();
+    ctx.arc(stickerX, stickerY, radius, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(11,11,11,0.7)";
+    ctx.fill();
+    ctx.font = `${Math.round(28 * sticker.scale)}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#f4f1ea";
+    ctx.fillText(sticker.glyph, stickerX, stickerY + 1);
+  }
+  ctx.restore();
+
+}
+
 async function generateCanvas(ctxOut = null, videoElements = null, singleStrip = true) {
+  await waitForExportFonts();
+  const mediaElements = await resolveExportMedia(videoElements);
+  const width = singleStrip ? EXPORT_LAYOUT.singleWidth : EXPORT_LAYOUT.doubleWidth;
   const canvas = ctxOut ? null : document.createElement("canvas");
-  const canvasWidth = singleStrip ? 600 : 1200;
   if (canvas) {
-    canvas.width = canvasWidth;
-    canvas.height = 1800;
+    canvas.width = width;
+    canvas.height = EXPORT_LAYOUT.height;
   }
   const ctx = ctxOut || canvas.getContext("2d");
-
-  const colors = { black: "#0b0b0b", paper: "#f4f1ea", red: "#9e312b", blue: "#26364a", sage: "#66705f" };
-  const frameColors = { original: "#050505", mono: "#2b2b29", warm: "#554940", cool: "#3c4650", vintage: "#4b4839" };
-  const filters = {
-    original: "none",
-    mono: "grayscale(100%) contrast(105%)",
-    warm: "sepia(30%) saturate(118%) contrast(102%)",
-    cool: "saturate(82%) hue-rotate(174deg) contrast(104%)",
-    vintage: "sepia(58%) saturate(82%) contrast(92%)",
-  };
-
-  // Draw table background
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.clearRect(0, 0, width, EXPORT_LAYOUT.height);
   ctx.fillStyle = "#0b0b0b";
-  const fullWidth = singleStrip ? 600 : 1200;
-  ctx.fillRect(0, 0, fullWidth, 1800);
+  ctx.fillRect(0, 0, width, EXPORT_LAYOUT.height);
 
-  const stripWidth = 550;
-  const stripHeight = 1750;
-  const stripY = 25;
-  const paddingX = 36;
-  const paddingTop = 50;
-  
-  const colWidth = stripWidth - paddingX * 2; // 478
-  const photoHeight = 319; // 478 * 2 / 3
-  const gap = 24;
-  
-  const columnsToDraw = singleStrip ? [0] : [0, 1];
-  for (const col of columnsToDraw) {
-    const stripX = singleStrip ? 25 : (col === 0 ? 35 : 615);
-    
-    // Draw the physical strip background
-    const isBlack = !appState.background || appState.background === "black";
-    if (isBlack) {
-      const bgGradient = ctx.createLinearGradient(stripX, stripY, stripX, stripY + stripHeight);
-      bgGradient.addColorStop(0, "#121212");
-      bgGradient.addColorStop(1, "#040404");
-      ctx.fillStyle = bgGradient;
-    } else {
-      ctx.fillStyle = colors[appState.background];
-    }
-    ctx.fillRect(stripX, stripY, stripWidth, stripHeight);
-    
-    // Draw strip border and shadow
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(stripX, stripY, stripWidth, stripHeight);
-    
-    const x = stripX + paddingX;
-    const startY = stripY + paddingTop;
-    let y = startY;
-
-    for (let i = 0; i < 4; i++) {
-      ctx.fillStyle = frameColors[appState.filter] || frameColors.original;
-      ctx.fillRect(x, y, colWidth, photoHeight);
-
-      ctx.save();
-      ctx.filter = filters[appState.filter] || filters.original;
-      if (mediaElements[i]) {
-        ctx.drawImage(mediaElements[i], x, y, colWidth, photoHeight);
-      }
-      ctx.restore();
-
-      // Photo overlays (frame number and 'captured' text)
-      ctx.save();
-      ctx.font = '600 12px "DM Mono", Consolas, monospace';
-      ctx.fillStyle = 'rgba(244, 241, 234, 0.72)';
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
-      ctx.shadowBlur = 12;
-      ctx.shadowOffsetY = 1;
-      ctx.fillText(String(i + 1).padStart(2, '0'), x + 16, y + photoHeight - 16);
-      ctx.font = '400 12px "Manrope", Arial, sans-serif';
-      ctx.fillStyle = '#6f6d67';
-      ctx.fillText(mediaElements[i] ? 'captured' : 'moment', x + 38, y + photoHeight - 16);
-      ctx.restore();
-
-      y += photoHeight + gap;
-    }
-
-    // Aesthetic Decorations
-    ctx.save();
-    const isPaper = appState.background === "paper";
-    ctx.fillStyle = isPaper ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.15)';
-    ctx.font = '400 13px "DM Mono", Consolas, monospace';
-    
-    // Top deco
-    ctx.textAlign = "left";
-    ctx.fillText("kisap. // ARCHIVE 01", x, startY - 20);
-    
-    // Vertical left deco
-    ctx.save();
-    ctx.translate(x - 20, startY + 1100);
-    ctx.rotate(-Math.PI / 2);
-    ctx.fillText("A MOMENT, STILL MOVING", 0, 0);
-    ctx.restore();
-    ctx.restore();
-
-    // Footer Branding
-    ctx.save();
-    ctx.font = '600 24px "Manrope", Arial, sans-serif';
-    const baseText = "kisap";
-    const dotText = ".";
-    const baseWidth = ctx.measureText(baseText).width;
-    const dotWidth = ctx.measureText(dotText).width;
-    const totalWidth = baseWidth + dotWidth;
-    const startX = x + colWidth / 2 - totalWidth / 2;
-    
-    // Y is currently at startY + 1348. Total strip height is 1750. 
-    // Remaining = 1750 - 50 - 1348 = 352. Center is 176.
-    // So 1348 + 176 = 1524. 
-    // y is at 1348 + 50 = 1398. We need to go down to 1524. Let's add 126.
-    
-    ctx.textAlign = "left";
-    ctx.fillStyle = isPaper ? '#0b0b0b' : '#f4f1ea';
-    ctx.fillText(baseText, startX, y + 120);
-    ctx.fillStyle = "#ff4d3d";
-    ctx.fillText(dotText, startX + baseWidth, y + 120);
-
-    ctx.fillStyle = isPaper ? '#0b0b0b' : '#aaa79f';
-    ctx.textAlign = "center";
-    ctx.font = '400 14px "DM Mono", Consolas, monospace';
-    ctx.fillText(stripDate(), x + colWidth / 2, y + 154);
-    ctx.restore();
-
-    // Stickers
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x, startY, colWidth, 1348); // clip strictly to photo column area
-    ctx.clip();
-    for (const sticker of appState.stickers) {
-      const stX = x + (sticker.x / 100) * colWidth;
-      const stY = startY + (sticker.y / 100) * 1348;
-      ctx.font = `${Math.round(48 * sticker.scale)}px sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(sticker.glyph, stX, stY);
-    }
-    ctx.restore();
-
-    // Draw glossy glare overlay strictly on this strip
-    const grad = ctx.createLinearGradient(stripX, stripY, stripX + stripWidth, stripY + 600);
-    grad.addColorStop(0, "rgba(255, 255, 255, 0.05)");
-    grad.addColorStop(0.3, "rgba(255, 255, 255, 0.015)");
-    grad.addColorStop(0.31, "rgba(255, 255, 255, 0)");
-    grad.addColorStop(1, "rgba(255, 255, 255, 0)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(stripX, stripY, stripWidth, stripHeight);
-  }
-
+  const stripPositions = singleStrip ? EXPORT_LAYOUT.singleStripX : EXPORT_LAYOUT.doubleStripX;
+  stripPositions.forEach((stripX) => drawExportStrip(ctx, stripX, mediaElements));
+  const isPaper = appState.background === "paper";
+  ctx.strokeStyle = isPaper ? "rgba(11,11,11,0.14)" : "rgba(255,255,255,0.08)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, width - 1, EXPORT_LAYOUT.height - 1);
   return canvas;
 }
 
+function nextAnimationFrame() {
+  return new Promise((resolve) => window.requestAnimationFrame(resolve));
+}
+
+function loadPlaybackVideo(src) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "auto";
+    video.muted = true;
+    video.playsInline = true;
+    video.loop = true;
+    video.oncanplay = () => resolve(video);
+    video.onerror = () => reject(new Error("A motion clip could not be loaded for export."));
+    video.src = src;
+    video.load();
+  });
+}
+
+function downloadExportBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
 async function exportStrip(type) {
-  const btnPhoto = document.querySelector("#btn-download-photo");
+  getFeedbackAudioContext();
+  const btnDouble = document.querySelector("#btn-download-double");
+  const btnSingle = document.querySelector("#btn-download-single");
   const btnMotion = document.querySelector("#btn-download-motion");
   const btnShare = document.querySelector("#btn-share-photo");
 
   const setBusy = (isBusy, label = "Downloading...") => {
-    if (btnPhoto) {
-      btnPhoto.disabled = isBusy;
-      if (type === "photo" && isBusy) btnPhoto.textContent = label;
-      else if (type === "photo") btnPhoto.textContent = "Download photo";
+    if (btnDouble) {
+      btnDouble.disabled = isBusy;
+      btnDouble.textContent = type === "photo-double" && isBusy ? label : "Download double strip";
+    }
+    if (btnSingle) {
+      btnSingle.disabled = isBusy;
+      btnSingle.textContent = type === "photo-single" && isBusy ? label : "Download single strip";
     }
     if (btnMotion) {
       btnMotion.disabled = isBusy;
@@ -1084,9 +1380,14 @@ async function exportStrip(type) {
   try {
     setBusy(true);
 
-    if (type === "photo" || type === "share") {
-      const canvas = await generateCanvas(null, null, false); // generate double strip
-      const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", 0.92));
+    if (type === "photo-double" || type === "photo-single" || type === "share") {
+      const singleStrip = type === "photo-single";
+      const canvas = await generateCanvas(null, null, singleStrip);
+      const blob = await new Promise((resolve, reject) => canvas.toBlob(
+        (result) => result ? resolve(result) : reject(new Error("The photo could not be encoded.")),
+        "image/jpeg",
+        0.94,
+      ));
 
       if (type === "share") {
         const file = new File([blob], `kisap-strip-${Date.now()}.jpg`, { type: "image/jpeg" });
@@ -1096,88 +1397,110 @@ async function exportStrip(type) {
           files: [file]
         });
       } else {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `kisap-strip-${Date.now()}.jpg`;
-        a.click();
-        URL.revokeObjectURL(url);
+        const sizeLabel = singleStrip ? "single" : "double";
+        downloadExportBlob(blob, `kisap-${sizeLabel}-strip-${Date.now()}.jpg`);
       }
+      playReadyChime();
+      vibrate([20, 35, 20]);
     } else if (type === "motion") {
       if (!window.MediaRecorder) throw new Error("Video export is not supported in this browser.");
-      
-      const targetCanvas = document.createElement("canvas");
-      targetCanvas.width = 600;
-      targetCanvas.height = 1800;
-      const ctx = targetCanvas.getContext("2d");
-      
-      const stream = targetCanvas.captureStream(30);
-      const types = [
-        "video/mp4",
-        "video/webm;codecs=h264",
-        "video/webm;codecs=vp8",
-        "video/webm"
-      ];
-      const mimeType = types.find(t => MediaRecorder.isTypeSupported(t)) || "video/webm";
-      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5000000 });
-      const chunks = [];
-      recorder.ondataavailable = e => chunks.push(e.data);
-      
-      const recordingPromise = new Promise(resolve => {
-        recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
-      });
-      
-      setBusy(true, "Encoding video...");
-      
-      const videos = await Promise.all(
-        appState.moments.map(m => new Promise((resolve, reject) => {
-          const v = document.createElement("video");
-          v.src = m.videoUrl;
-          v.muted = true;
-          v.playsInline = true;
-          v.oncanplay = () => resolve(v);
-          v.onerror = reject;
-          v.load();
-        }))
-      );
 
-      const photos = await Promise.all(
-        appState.moments.map(m => new Promise((resolve, reject) => {
-          const img = new Image();
-          img.onload = () => resolve(img);
-          img.onerror = reject;
-          img.src = m.stillUrl;
-        }))
-      );
-      
-      recorder.start();
-      videos.forEach(v => v.play());
-      
-      const startMs = performance.now();
-      
-      const drawFrame = async () => {
-        const elapsed = performance.now() - startMs;
-        if (elapsed >= 10000) {
-          recorder.stop();
-          videos.forEach(v => { v.pause(); v.src = ""; });
-          return;
+      const targetCanvas = document.createElement("canvas");
+      targetCanvas.width = EXPORT_LAYOUT.singleWidth;
+      targetCanvas.height = EXPORT_LAYOUT.height;
+      const ctx = targetCanvas.getContext("2d", { alpha: false });
+      if (typeof targetCanvas.captureStream !== "function") {
+        throw new Error("Motion export is not supported in this browser.");
+      }
+      const stream = targetCanvas.captureStream(MOTION_EXPORT_FPS);
+      const canvasTrack = stream.getVideoTracks()[0];
+      if (canvasTrack?.applyConstraints) {
+        try {
+          await canvasTrack.applyConstraints({ frameRate: MOTION_EXPORT_FPS });
+        } catch {
+          // Canvas tracks already use the requested rate in browsers without constraints support.
         }
-        
-        const currentMedia = elapsed < 9000 ? videos : photos;
-        await generateCanvas(ctx, currentMedia, true);
-        window.requestAnimationFrame(drawFrame);
+      }
+      let recorder;
+      try {
+        recorder = createCompatibleVideoRecorder(stream, MOTION_EXPORT_BITRATE);
+      } catch (error) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw error;
+      }
+      const chunks = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data?.size) chunks.push(event.data);
       };
-      
-      drawFrame();
-      const blob = await recordingPromise;
-      
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      const ext = mimeType.includes("mp4") ? "mp4" : "webm";
-      a.download = `kisap-motion-${Date.now()}.${ext}`;
-      a.click();
-      URL.revokeObjectURL(url);
+
+      const recordingPromise = new Promise((resolve, reject) => {
+        recorder.onstop = () => {
+          const mimeType = recorder.mimeType || chunks[0]?.type || "video/webm";
+          resolve(new Blob(chunks, { type: mimeType }));
+        };
+        recorder.onerror = (event) => reject(event.error || new Error("Video encoding failed."));
+      });
+      recordingPromise.catch(() => {});
+
+      setBusy(true, "Encoding video...");
+      let videos = [];
+      try {
+        videos = await Promise.all(appState.moments.map((moment) => {
+          if (!moment?.videoUrl) throw new Error("All four moments must be captured before motion export.");
+          return loadPlaybackVideo(moment.videoUrl);
+        }));
+        const photos = await Promise.all(appState.moments.map((moment) => {
+          if (!moment?.stillUrl) throw new Error("All four moments must be captured before motion export.");
+          return loadCanvasImage(moment.stillUrl);
+        }));
+
+        videos.forEach((video) => { video.currentTime = 0; });
+        await Promise.all(videos.map((video) => video.play()));
+        await generateCanvas(ctx, videos, true);
+        await startVideoRecorder(recorder);
+
+        const startedAt = performance.now();
+        const frameInterval = 1_000 / MOTION_EXPORT_FPS;
+        let lastFrameAt = startedAt - frameInterval;
+        await new Promise((resolve, reject) => {
+          const drawFrame = async (now) => {
+            try {
+              const elapsed = now - startedAt;
+              if (elapsed >= 10_000) {
+                resolve();
+                return;
+              }
+              if (now - lastFrameAt >= frameInterval) {
+                lastFrameAt = now;
+                await generateCanvas(ctx, elapsed < 9_000 ? videos : photos, true);
+              }
+              window.requestAnimationFrame(drawFrame);
+            } catch (error) {
+              reject(error);
+            }
+          };
+          window.requestAnimationFrame(drawFrame);
+        });
+
+        await generateCanvas(ctx, photos, true);
+        await nextAnimationFrame();
+        await nextAnimationFrame();
+        recorder.stop();
+        const blob = await recordingPromise;
+        const mimeType = blob.type || recorder.mimeType;
+        const extension = recorderFileExtension(mimeType);
+        downloadExportBlob(blob, `kisap-motion-${Date.now()}.${extension}`);
+        playReadyChime();
+        vibrate([20, 35, 20]);
+      } finally {
+        if (recorder.state !== "inactive") recorder.stop();
+        stream.getTracks().forEach((track) => track.stop());
+        videos.forEach((video) => {
+          video.pause();
+          video.removeAttribute("src");
+          video.load();
+        });
+      }
     }
   } catch (err) {
     if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
@@ -1188,4 +1511,15 @@ async function exportStrip(type) {
   }
 }
 
+function handleCaptureShortcut(event) {
+  if (appState.screen !== "capture" || appState.busy || event.repeat) return;
+  if (event.key !== " " && event.key !== "Enter") return;
+  const target = event.target;
+  if (target instanceof HTMLElement && target.closest("input, select, textarea, button, a")) return;
+  if (!cameraIsActive() || !document.querySelector("[data-capture-moment]")) return;
+  event.preventDefault();
+  runCapture();
+}
+
+document.addEventListener("keydown", handleCaptureShortcut);
 render();

@@ -4,7 +4,7 @@ Kisap is a private, browser-based photo booth built around four still and moving
 
 ## Current phase
 
-Phase 3 adds the focused editor. The four captures are duplicated into the final two-column composition only here. Users can choose a photo filter, a plain strip color, and up to six restrained stickers; sticker position and scale are mirrored across both strips. Final file rendering, downloads, and sharing remain for Phase 4.
+Phase 4 adds final media export. The live preview and the 1200 × 1800 photo use the same two-strip geometry, colors, filters, typography, and sticker coordinates. Motion export prefers H.264 in an MP4 container when the browser provides it, with standards-based WebM recording as the fallback.
 
 ## Local development
 
