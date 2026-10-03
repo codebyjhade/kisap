@@ -1647,11 +1647,11 @@ async function exportStrip(type) {
   const setBusy = (isBusy, label = "Downloading...") => {
     if (btnDouble) {
       btnDouble.disabled = isBusy;
-      btnDouble.textContent = type === "photo-double" && isBusy ? label : "Download double strip";
+      btnDouble.textContent = "Download double strip";
     }
     if (btnSingle) {
       btnSingle.disabled = isBusy;
-      btnSingle.textContent = type === "photo-single" && isBusy ? label : "Download single strip";
+      btnSingle.textContent = "Download single strip";
     }
     if (btnMotion) {
       btnMotion.disabled = isBusy;
