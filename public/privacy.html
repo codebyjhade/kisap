@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0b0b" />
+    <title>Privacy — kisap.</title>
+    <style>
+      @font-face { font-family: Manrope; src: url('/fonts/Manrope-Variable.ttf') format('truetype'); font-weight: 200 800; font-display: swap; }
+      @font-face { font-family: DM Mono; src: url('/fonts/DMMono-Regular.ttf') format('truetype'); font-weight: 400; font-display: swap; }
+      :root { color-scheme: dark; --ink:#0b0b0b; --paper:#f4f1ea; --muted:#aaa79f; --line:rgba(244,241,234,.18); --signal:#ff4d3d; }
+      * { box-sizing:border-box; }
+      body { margin:0; min-width:320px; min-height:100vh; background:var(--ink); color:var(--paper); font-family:Manrope,Arial,sans-serif; }
+      header, main, footer { width:min(100% - 40px, 880px); margin-inline:auto; }
+      header { min-height:92px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); }
+      .brand { color:var(--paper); font-size:2rem; font-weight:700; letter-spacing:-.08em; text-decoration:none; }
+      .dot { color:var(--signal); }
+      .back { color:var(--muted); font:400 .7rem "DM Mono",monospace; letter-spacing:.1em; text-decoration:none; text-transform:uppercase; }
+      main { padding:clamp(64px,10vw,120px) 0; }
+      .eyebrow { color:var(--signal); font:400 .72rem "DM Mono",monospace; letter-spacing:.12em; text-transform:uppercase; }
+      h1 { max-width:760px; margin:24px 0 34px; font-size:clamp(3rem,8vw,6.6rem); font-weight:300; letter-spacing:-.07em; line-height:.92; }
+      .intro { max-width:680px; color:var(--muted); font-size:1.15rem; line-height:1.75; }
+      .privacy-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px; margin-top:64px; border:1px solid var(--line); background:var(--line); }
+      article { min-height:230px; padding:32px; background:var(--ink); }
+      article span { color:var(--signal); font:400 .68rem "DM Mono",monospace; letter-spacing:.1em; }
+      h2 { margin:28px 0 14px; font-size:1.35rem; font-weight:500; }
+      article p { margin:0; color:var(--muted); line-height:1.7; }
+      footer { display:flex; justify-content:space-between; gap:24px; padding:30px 0 48px; border-top:1px solid var(--line); color:var(--muted); font:400 .66rem "DM Mono",monospace; letter-spacing:.08em; text-transform:uppercase; }
+      @media (max-width:640px) { .privacy-grid { grid-template-columns:1fr; } footer { flex-direction:column; } }
+    </style>
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="/">kisap<span class="dot">.</span></a>
+      <a class="back" href="/">Back to booth →</a>
+    </header>
+    <main>
+      <p class="eyebrow">Privacy / local only</p>
+      <h1>Your moments stay with you.</h1>
+      <p class="intro">Kisap is designed as a private, browser-based photo booth. It does not require an account and does not send your photos, videos, or edits to a Kisap server.</p>
+      <section class="privacy-grid">
+        <article><span>01 / CAMERA</span><h2>Permission stays under your control.</h2><p>Your browser asks before Kisap can use the camera. Audio is never requested. You can remove camera permission through your browser settings at any time.</p></article>
+        <article><span>02 / PROCESSING</span><h2>Created directly on your device.</h2><p>Photos, motion clips, filters, stickers, and finished exports are processed inside your browser instead of being uploaded for processing.</p></article>
+        <article><span>03 / RECOVERY</span><h2>Temporary and local.</h2><p>An unfinished strip may be stored in this browser for up to six hours so an accidental refresh does not erase your work. Exporting, starting over, or expiration removes that recovery copy.</p></article>
+        <article><span>04 / SHARING</span><h2>You decide where it goes.</h2><p>When supported, Share opens your device’s native share sheet. Kisap does not select the destination or receive a copy of what you share.</p></article>
+        <article><span>05 / TRACKING</span><h2>No analytics or advertising trackers.</h2><p>Kisap does not include behavioral analytics, advertising pixels, user profiles, or cross-site tracking.</p></article>
+        <article><span>06 / CONTROL</span><h2>Clear it whenever you want.</h2><p>Use Start over to discard the active session. You can also clear this site’s stored data and camera permission through your browser’s privacy settings.</p></article>
+      </section>
+    </main>
+    <footer><span>kisap. / private web photo booth</span><span>Last updated October 3, 2026</span></footer>
+  </body>
+</html>

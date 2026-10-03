@@ -11,6 +11,11 @@ import {
   recorderFileExtension,
   startVideoRecorder,
 } from "./media-recorder.js";
+import {
+  clearSessionRecovery,
+  loadSessionRecovery,
+  saveSessionRecovery,
+} from "./session-store.js";
 
 const SCREEN_ORDER = ["home", "capture", "review", "edit", "finish"];
 const STICKER_CATALOG = [
@@ -31,7 +36,7 @@ const screenMeta = {
 };
 
 const appState = {
-  screen: getInitialScreen(),
+  screen: "home",
   background: "black",
   filter: "mono",
   moments: [null, null, null, null],
@@ -47,10 +52,13 @@ const appState = {
   busy: false,
   soundEnabled: true,
   flashEnabled: true,
+  recoveryAvailable: false,
+  recoveryUpdatedAt: 0,
 };
 
 let captureController = null;
 let feedbackAudioContext = null;
+let recoveryWriteQueue = Promise.resolve();
 
 function getFeedbackAudioContext() {
   if (!appState.soundEnabled) return null;
@@ -120,11 +128,69 @@ function vibrate(pattern) {
 
 function getInitialScreen() {
   const requested = window.location.hash.replace("#", "");
-  // If requesting a state-dependent screen without moments, reset to home
-  if (["review", "edit", "finish"].includes(requested) && !appState.moments.every(Boolean)) {
-    return "home";
-  }
+  if (requested === "review" && !appState.moments.some(Boolean)) return "home";
+  if (["edit", "finish"].includes(requested) && !appState.moments.every(Boolean)) return "home";
   return SCREEN_ORDER.includes(requested) ? requested : "home";
+}
+
+function recoverySnapshot() {
+  return {
+    screen: appState.screen,
+    activeMoment: appState.activeMoment,
+    background: appState.background,
+    filter: appState.filter,
+    stickers: appState.stickers.map((sticker) => ({ ...sticker })),
+    moments: appState.moments.map((moment) => moment ? {
+      stillBlob: moment.stillBlob,
+      videoBlob: moment.videoBlob,
+      mirrored: moment.mirrored,
+    } : null),
+  };
+}
+
+function queueRecoverySave() {
+  if (!appState.moments.some(Boolean)) return recoveryWriteQueue;
+  const snapshot = recoverySnapshot();
+  recoveryWriteQueue = recoveryWriteQueue
+    .catch(() => {})
+    .then(() => saveSessionRecovery(snapshot))
+    .catch(() => {});
+  return recoveryWriteQueue;
+}
+
+function queueRecoveryClear() {
+  recoveryWriteQueue = recoveryWriteQueue
+    .catch(() => {})
+    .then(() => clearSessionRecovery());
+  return recoveryWriteQueue;
+}
+
+function restoreRecoverySnapshot(stored) {
+  if (!stored?.moments?.some(Boolean)) return false;
+  appState.moments.forEach(releaseMoment);
+  appState.moments = Array.from({ length: 4 }, (_, index) => {
+    const moment = stored.moments[index];
+    if (!moment?.stillBlob || !moment?.videoBlob) return null;
+    return {
+      stillBlob: moment.stillBlob,
+      videoBlob: moment.videoBlob,
+      stillUrl: URL.createObjectURL(moment.stillBlob),
+      videoUrl: URL.createObjectURL(moment.videoBlob),
+      mirrored: moment.mirrored !== false,
+    };
+  });
+  appState.activeMoment = Number.isInteger(stored.activeMoment) ? stored.activeMoment : 0;
+  appState.background = stored.background || "black";
+  appState.filter = stored.filter || "mono";
+  appState.stickers = Array.isArray(stored.stickers) ? stored.stickers : [];
+  appState.recoveryAvailable = true;
+  appState.recoveryUpdatedAt = stored.updatedAt || Date.now();
+  return true;
+}
+
+function recoveryResumeTarget() {
+  if (appState.moments.every(Boolean)) return "edit";
+  return "review";
 }
 
 function navigate(screen) {
@@ -137,6 +203,7 @@ function navigate(screen) {
   appState.screen = screen;
   window.location.hash = screen;
   render();
+  if (screen !== "home" && appState.moments.some(Boolean)) queueRecoverySave();
   window.scrollTo({ top: 0, behavior: "instant" });
 }
 
@@ -238,6 +305,7 @@ function stripDiagram({ duplicate = true, usePhotos = true, editable = false } =
 }
 
 function homeScreen() {
+  const recoveredCount = appState.moments.filter(Boolean).length;
   return `
     <div class="landing-page">
       <nav class="landing-nav">
@@ -272,6 +340,19 @@ function homeScreen() {
               <span><strong>No Apps Needed:</strong> Works right in your browser.</span>
             </li>
           </ul>
+
+          ${appState.recoveryAvailable ? `
+            <div class="recovery-card" role="status">
+              <div>
+                <strong>Continue your private session?</strong>
+                <span>${recoveredCount} of 4 moments recovered on this device.</span>
+              </div>
+              <div class="recovery-actions">
+                <button class="button button--light" data-resume-session>Resume strip</button>
+                <button class="text-button" data-discard-recovery>Start over</button>
+              </div>
+            </div>
+          ` : ""}
 
           <div class="hero-cta-group">
             <button class="button button--light hero-cta" data-start-session>Enter Photo Booth <span aria-hidden="true">→</span></button>
@@ -312,7 +393,7 @@ function homeScreen() {
           <div class="split-text">
              <p class="eyebrow">Local Only</p>
              <h2 class="section-title">Stays on your device.</h2>
-             <p class="section-desc">Kisap does not need an account, gallery, or upload. Everything is processed directly in your browser. Nothing follows you home.</p>
+             <p class="section-desc">Kisap does not need an account, gallery, or upload. Everything is processed directly in your browser. An unfinished strip can be recovered privately for up to six hours, then it expires automatically.</p>
           </div>
           <div class="split-visual">
              <div class="privacy-shield">
@@ -330,7 +411,10 @@ function homeScreen() {
           <p>A private, browser-based photo booth for four still and moving moments.</p>
           <div class="footer-bottom">
             <span>© ${new Date().getFullYear()} Kisap. Created by Bryan. All rights reserved.</span>
-            <button class="button button--ghost footer-start" data-start-session>Start now</button>
+            <div class="footer-actions">
+              <a class="text-button" href="/privacy.html">Privacy</a>
+              <button class="button button--ghost footer-start" data-start-session>Start now</button>
+            </div>
           </div>
         </div>
       </footer>
@@ -507,6 +591,7 @@ function editorScreen() {
 }
 
 function finishScreen() {
+  const shareLabel = browserMayShareFiles() ? "Share photo" : "Save photo";
   return `
     <main class="finish-page page-shell">
       <section class="finish-card">
@@ -517,17 +602,38 @@ function finishScreen() {
           <button class="button button--light" id="btn-download-double">Download double strip</button>
           <button class="button button--ghost" id="btn-download-single">Download single strip</button>
           <button class="button button--light" id="btn-download-motion">Download motion</button>
-          <button class="button button--ghost" id="btn-share-photo" ${navigator.share ? "" : "style='display:none'"}>Share</button>
+          <button class="button button--ghost" id="btn-share-photo">${shareLabel}</button>
         </div>
-        <button class="text-button" data-start-session>Start another strip</button>
+        <p class="finish-status" id="finish-status" role="status" aria-live="polite"></p>
+        <div class="finish-links">
+          <button class="text-button" data-nav="edit">← Back to editor</button>
+          <button class="text-button" data-start-session>Start another strip</button>
+        </div>
       </section>
       <aside class="privacy-panel">
         <span class="privacy-index">LOCAL / 002</span>
         <h2>Your moments stay on this device.</h2>
-        <p>Kisap does not need an account, gallery, or upload. Starting another strip or closing the session clears its temporary media.</p>
+        <p>Kisap does not need an account, gallery, or upload. Unfinished moments stay only in this browser for recovery and expire after six hours. Starting another strip or exporting clears that recovery copy.</p>
       </aside>
     </main>
   `;
+}
+
+function browserMayShareFiles() {
+  if (typeof navigator.share !== "function" || typeof navigator.canShare !== "function") return false;
+  try {
+    const probe = new File([new Uint8Array([0])], "kisap-share-check.jpg", { type: "image/jpeg" });
+    return navigator.canShare({ files: [probe] });
+  } catch {
+    return false;
+  }
+}
+
+function setFinishStatus(message, tone = "neutral") {
+  const status = document.querySelector("#finish-status");
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.tone = tone;
 }
 
 const screens = { home: homeScreen, capture: captureScreen, review: reviewScreen, edit: editorScreen, finish: finishScreen };
@@ -542,6 +648,17 @@ function bindInteractions() {
       resetSession();
       navigate("capture");
     });
+  });
+
+  document.querySelector("[data-resume-session]")?.addEventListener("click", () => {
+    appState.recoveryAvailable = false;
+    appState.notice = "Your private session was restored on this device.";
+    navigate(recoveryResumeTarget());
+  });
+
+  document.querySelector("[data-discard-recovery]")?.addEventListener("click", () => {
+    resetSession();
+    render();
   });
 
   const observer = new IntersectionObserver((entries) => {
@@ -652,6 +769,7 @@ function updateEditorChoice(kind, value) {
     element.classList.toggle("is-selected", selected);
     element.setAttribute("aria-pressed", String(selected));
   });
+  queueRecoverySave();
 }
 
 
@@ -668,6 +786,7 @@ function addSticker(catalogId) {
   appState.stickers.push({ ...catalogSticker, id, x: 50 + offset, y: 42 + offset, scale: 1 });
   appState.selectedStickerId = id;
   updateStickerEditor();
+  queueRecoverySave();
 }
 
 function selectedSticker() {
@@ -681,12 +800,14 @@ function resizeSelectedSticker(change) {
   document.querySelectorAll(`[data-sticker-id="${sticker.id}"], [data-mirror-sticker-id="${sticker.id}"]`).forEach((element) => {
     element.style.setProperty("--sticker-scale", sticker.scale);
   });
+  queueRecoverySave();
 }
 
 function removeSelectedSticker() {
   appState.stickers = appState.stickers.filter((sticker) => sticker.id !== appState.selectedStickerId);
   appState.selectedStickerId = null;
   updateStickerEditor();
+  queueRecoverySave();
 }
 
 function beginStickerDrag(event) {
@@ -723,6 +844,7 @@ function beginStickerDrag(event) {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", end);
     window.removeEventListener("pointercancel", end);
+    window.requestAnimationFrame(() => queueRecoverySave());
   };
   window.addEventListener("pointermove", move, { passive: true });
   window.addEventListener("pointerup", end, { once: true });
@@ -902,6 +1024,7 @@ async function runCapture() {
       appState.retaking = false;
       appState.notice = `Moment ${capturedNumber} saved.`;
       appState.busy = false;
+      queueRecoverySave();
       navigate("review");
       return;
     }
@@ -909,6 +1032,7 @@ async function runCapture() {
     appState.activeMoment = appState.moments.findIndex((moment) => !moment);
     appState.notice = `Moment ${capturedNumber} saved. Ready for the next one.`;
     appState.busy = false;
+    queueRecoverySave();
     render();
   } catch (error) {
     captureController = null;
@@ -934,6 +1058,7 @@ function setCaptureUi(mode, seconds = 10) {
   if (mode === "recording") {
     stage?.classList.add("is-recording");
     stage?.classList.remove("is-capturing-still", "is-encoding");
+    stage?.classList.toggle("is-final-countdown", seconds > 0 && seconds <= 3);
     if (countdown) countdown.textContent = String(seconds);
     if (kicker) kicker.textContent = seconds <= 3 ? "Final photo" : "Recording motion";
     if (status) status.textContent = seconds > 3
@@ -943,7 +1068,7 @@ function setCaptureUi(mode, seconds = 10) {
     if (progress) progress.style.width = `${(10 - seconds) * 10}%`;
     playCountdownTick(seconds);
   } else if (mode === "still") {
-    stage?.classList.remove("is-recording", "is-encoding");
+    stage?.classList.remove("is-recording", "is-final-countdown", "is-encoding");
     stage?.classList.add("is-capturing-still");
     if (countdown) countdown.textContent = "●";
     if (kicker) kicker.textContent = "Photo captured";
@@ -951,8 +1076,7 @@ function setCaptureUi(mode, seconds = 10) {
     if (recordingState) recordingState.textContent = "STILL · CAPTURED";
     if (progress) progress.style.width = "100%";
   } else {
-    stage?.classList.remove("is-recording");
-    stage?.classList.remove("is-capturing-still");
+    stage?.classList.remove("is-recording", "is-final-countdown", "is-capturing-still");
     stage?.classList.add("is-encoding");
     if (countdown) countdown.textContent = "···";
     if (kicker) kicker.textContent = "Saving your moment";
@@ -962,11 +1086,12 @@ function setCaptureUi(mode, seconds = 10) {
   }
 }
 
-function replaceMoment(index, { stillBlob, videoBlob }) {
+function replaceMoment(index, { stillBlob, videoBlob, mirrored = true }) {
   releaseMoment(appState.moments[index]);
   appState.moments[index] = {
     stillBlob,
     videoBlob,
+    mirrored,
     stillUrl: URL.createObjectURL(stillBlob),
     videoUrl: URL.createObjectURL(videoBlob),
   };
@@ -994,6 +1119,9 @@ function resetSession() {
   appState.filter = "mono";
   appState.stickers = [];
   appState.selectedStickerId = null;
+  appState.recoveryAvailable = false;
+  appState.recoveryUpdatedAt = 0;
+  queueRecoveryClear();
 }
 
 function cameraErrorMessage(error) {
@@ -1071,6 +1199,22 @@ const EXPORT_LAYOUT = Object.freeze({
 const MOTION_EXPORT_FPS = 24;
 const MOTION_EXPORT_BITRATE = 12_000_000;
 
+function getMotionExportProfile() {
+  const cores = navigator.hardwareConcurrency || 4;
+  const memory = navigator.deviceMemory || 0;
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+    || (navigator.maxTouchPoints > 1 && Math.min(screen.width, screen.height) < 900);
+  const isLowPower = cores <= 4 || (memory > 0 && memory <= 4);
+
+  if (isLowPower) {
+    return { fps: 15, bitrate: 5_000_000, filterScale: 0.55, label: "efficient" };
+  }
+  if (isMobile) {
+    return { fps: 18, bitrate: 7_000_000, filterScale: 0.7, label: "mobile" };
+  }
+  return { fps: MOTION_EXPORT_FPS, bitrate: MOTION_EXPORT_BITRATE, filterScale: 1, label: "full" };
+}
+
 const EXPORT_COLORS = Object.freeze({
   black: "#0b0b0b",
   paper: "#f4f1ea",
@@ -1094,6 +1238,58 @@ const EXPORT_FILTERS = Object.freeze({
   cool: "saturate(82%) hue-rotate(174deg) contrast(104%)",
   vintage: "sepia(58%) saturate(82%) contrast(92%)",
 });
+
+function clampColor(value) {
+  return Math.max(0, Math.min(255, value));
+}
+
+function applyPortableFilter(imageData, filterName) {
+  if (!filterName || filterName === "original") return imageData;
+  const pixels = imageData.data;
+
+  for (let index = 0; index < pixels.length; index += 4) {
+    let red = pixels[index];
+    let green = pixels[index + 1];
+    let blue = pixels[index + 2];
+
+    if (filterName === "mono") {
+      const gray = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+      red = green = blue = gray;
+      red = (red - 128) * 1.05 + 128;
+      green = (green - 128) * 1.05 + 128;
+      blue = (blue - 128) * 1.05 + 128;
+    } else if (filterName === "warm" || filterName === "vintage") {
+      const amount = filterName === "warm" ? 0.3 : 0.58;
+      const sepiaRed = red * 0.393 + green * 0.769 + blue * 0.189;
+      const sepiaGreen = red * 0.349 + green * 0.686 + blue * 0.168;
+      const sepiaBlue = red * 0.272 + green * 0.534 + blue * 0.131;
+      red += (sepiaRed - red) * amount;
+      green += (sepiaGreen - green) * amount;
+      blue += (sepiaBlue - blue) * amount;
+      const saturation = filterName === "warm" ? 1.18 : 0.82;
+      const contrast = filterName === "warm" ? 1.02 : 0.92;
+      const luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+      red = (luminance + (red - luminance) * saturation - 128) * contrast + 128;
+      green = (luminance + (green - luminance) * saturation - 128) * contrast + 128;
+      blue = (luminance + (blue - luminance) * saturation - 128) * contrast + 128;
+    } else if (filterName === "cool") {
+      // A portable cool grade that visually matches the CSS preview without
+      // depending on CanvasRenderingContext2D.filter (unreliable on Safari).
+      const luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+      red = luminance + (red - luminance) * 0.82;
+      green = luminance + (green - luminance) * 0.82;
+      blue = luminance + (blue - luminance) * 0.82;
+      red = (red * 0.9 - 128) * 1.04 + 128;
+      green = (green * 1.01 - 128) * 1.04 + 128;
+      blue = (blue * 1.13 - 128) * 1.04 + 128;
+    }
+
+    pixels[index] = clampColor(red);
+    pixels[index + 1] = clampColor(green);
+    pixels[index + 2] = clampColor(blue);
+  }
+  return imageData;
+}
 
 let exportFontsReady;
 
@@ -1139,11 +1335,15 @@ function drawMediaCover(ctx, media, x, y, width, height) {
   }
 
   if (media.tagName === "VIDEO") {
-    ctx.save();
-    ctx.translate(x + width, y);
-    ctx.scale(-1, 1);
-    ctx.drawImage(media, sx, sy, sw, sh, 0, 0, width, height);
-    ctx.restore();
+    if (media.dataset.mirror !== "false") {
+      ctx.save();
+      ctx.translate(x + width, y);
+      ctx.scale(-1, 1);
+      ctx.drawImage(media, sx, sy, sw, sh, 0, 0, width, height);
+      ctx.restore();
+    } else {
+      ctx.drawImage(media, sx, sy, sw, sh, x, y, width, height);
+    }
     return;
   }
   ctx.drawImage(media, sx, sy, sw, sh, x, y, width, height);
@@ -1188,7 +1388,48 @@ function drawPaperTexture(ctx, stripX, isPaper) {
 
 }
 
-function drawExportFrame(ctx, media, index, x, y) {
+function createFilteredFrame(media, width, height, cache, renderToken, filterScale = 1) {
+  const scaledWidth = Math.max(1, Math.round(width * filterScale));
+  const scaledHeight = Math.max(1, Math.round(height * filterScale));
+  let cached = cache.get(media);
+  const cacheMatches = cached
+    && cached.width === scaledWidth
+    && cached.height === scaledHeight
+    && cached.filter === appState.filter;
+
+  if (!cacheMatches) {
+    const frame = document.createElement("canvas");
+    frame.width = scaledWidth;
+    frame.height = scaledHeight;
+    cached = {
+      frame,
+      width: scaledWidth,
+      height: scaledHeight,
+      filter: appState.filter,
+      renderToken: null,
+      ready: false,
+    };
+    cache.set(media, cached);
+  }
+
+  const isVideo = media.tagName === "VIDEO";
+  if (cached.ready && !isVideo) return cached.frame;
+  if (cached.ready && isVideo && cached.renderToken === renderToken) return cached.frame;
+
+  const { frame } = cached;
+  const frameContext = frame.getContext("2d", { willReadFrequently: true });
+  frameContext.clearRect(0, 0, scaledWidth, scaledHeight);
+  drawMediaCover(frameContext, media, 0, 0, scaledWidth, scaledHeight);
+  if (appState.filter !== "original") {
+    const pixels = frameContext.getImageData(0, 0, scaledWidth, scaledHeight);
+    frameContext.putImageData(applyPortableFilter(pixels, appState.filter), 0, 0);
+  }
+  cached.ready = true;
+  cached.renderToken = renderToken;
+  return frame;
+}
+
+function drawExportFrame(ctx, media, index, x, y, filteredFrames, renderToken, filterScale) {
   const { photoWidth, photoHeight } = EXPORT_LAYOUT;
   ctx.save();
   ctx.beginPath();
@@ -1198,26 +1439,36 @@ function drawExportFrame(ctx, media, index, x, y) {
   ctx.fillRect(x, y, photoWidth, photoHeight);
 
   if (media) {
-    ctx.filter = EXPORT_FILTERS[appState.filter] || EXPORT_FILTERS.original;
-    drawMediaCover(ctx, media, x, y, photoWidth, photoHeight);
-    ctx.filter = "none";
+    if (appState.filter === "original") {
+      drawMediaCover(ctx, media, x, y, photoWidth, photoHeight);
+    } else {
+      const frame = createFilteredFrame(
+        media,
+        photoWidth,
+        photoHeight,
+        filteredFrames,
+        renderToken,
+        filterScale,
+      );
+      ctx.drawImage(frame, x, y, photoWidth, photoHeight);
+    }
   }
 
   ctx.shadowColor = "rgba(0,0,0,0.45)";
   ctx.shadowBlur = 5;
   ctx.shadowOffsetY = 1;
-  ctx.font = '500 16px "DM Mono", Consolas, monospace';
+  ctx.font = '500 17px "DM Mono", Consolas, monospace';
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
-  ctx.fillStyle = "rgba(244,241,234,0.72)";
+  ctx.fillStyle = "rgba(244,241,234,0.9)";
   ctx.fillText(String(index + 1).padStart(2, "0"), x + 29, y + photoHeight - 29);
   ctx.textAlign = "right";
-  ctx.fillStyle = "#6f6d67";
+  ctx.fillStyle = "rgba(244,241,234,0.7)";
   ctx.fillText(media ? "captured" : "moment", x + photoWidth - 29, y + photoHeight - 29);
   ctx.restore();
 }
 
-function drawExportStrip(ctx, stripX, mediaElements) {
+function drawExportStrip(ctx, stripX, mediaElements, filteredFrames, renderToken, filterScale) {
   const layout = EXPORT_LAYOUT;
   const stripBottom = layout.stripY + layout.stripHeight;
   const photoX = stripX + layout.photoInset;
@@ -1240,12 +1491,12 @@ function drawExportStrip(ctx, stripX, mediaElements) {
 
   Array.from({ length: 4 }, (_, index) => mediaElements[index] || null).forEach((media, index) => {
     const frameY = photoY + index * (layout.photoHeight + layout.photoGap);
-    drawExportFrame(ctx, media, index, photoX, frameY);
+    drawExportFrame(ctx, media, index, photoX, frameY, filteredFrames, renderToken, filterScale);
   });
 
   ctx.save();
-  ctx.fillStyle = isPaper ? "rgba(0,0,0,0.3)" : "rgba(255,255,255,0.22)";
-  ctx.font = '400 13px "DM Mono", Consolas, monospace';
+  ctx.fillStyle = isPaper ? "rgba(0,0,0,0.62)" : "rgba(255,255,255,0.58)";
+  ctx.font = '500 15px "DM Mono", Consolas, monospace';
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
   const sideText = "KISAP / FOUR MOMENTS / 10S EACH";
@@ -1270,8 +1521,8 @@ function drawExportStrip(ctx, stripX, mediaElements) {
   ctx.fillStyle = "#ff4d3d";
   ctx.fillText(dotText, centeredBrandX + baseWidth, footerY + footerHeight / 2 - 24);
   ctx.textAlign = "center";
-  ctx.font = '400 14px "DM Mono", Consolas, monospace';
-  ctx.fillStyle = isPaper ? "#0b0b0b" : "#aaa79f";
+  ctx.font = '400 15px "DM Mono", Consolas, monospace';
+  ctx.fillStyle = isPaper ? "rgba(11,11,11,0.82)" : "rgba(244,241,234,0.74)";
   ctx.fillText(stripDate(), stripCenter, footerY + footerHeight / 2 + 31);
   ctx.restore();
 
@@ -1297,7 +1548,22 @@ function drawExportStrip(ctx, stripX, mediaElements) {
 
 }
 
-async function generateCanvas(ctxOut = null, videoElements = null, singleStrip = true) {
+function drawCombinedCenterBlend(ctx) {
+  const center = EXPORT_LAYOUT.doubleWidth / 2;
+  const blendWidth = 40;
+  const baseColor = EXPORT_COLORS[appState.background] || EXPORT_COLORS.black;
+  const blend = ctx.createLinearGradient(center - blendWidth / 2, 0, center + blendWidth / 2, 0);
+  blend.addColorStop(0, "rgba(0,0,0,0)");
+  blend.addColorStop(0.5, baseColor);
+  blend.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.save();
+  ctx.globalAlpha = appState.background === "paper" ? 0.12 : 0.2;
+  ctx.fillStyle = blend;
+  ctx.fillRect(center - blendWidth / 2, 0, blendWidth, EXPORT_LAYOUT.height);
+  ctx.restore();
+}
+
+async function generateCanvas(ctxOut = null, videoElements = null, singleStrip = true, options = {}) {
   await waitForExportFonts();
   const mediaElements = await resolveExportMedia(videoElements);
   const width = singleStrip ? EXPORT_LAYOUT.singleWidth : EXPORT_LAYOUT.doubleWidth;
@@ -1314,7 +1580,18 @@ async function generateCanvas(ctxOut = null, videoElements = null, singleStrip =
   ctx.fillRect(0, 0, width, EXPORT_LAYOUT.height);
 
   const stripPositions = singleStrip ? EXPORT_LAYOUT.singleStripX : EXPORT_LAYOUT.doubleStripX;
-  stripPositions.forEach((stripX) => drawExportStrip(ctx, stripX, mediaElements));
+  const filteredFrames = options.frameCache || new Map();
+  const renderToken = options.renderToken || Symbol("export-frame");
+  const filterScale = options.filterScale || 1;
+  stripPositions.forEach((stripX) => drawExportStrip(
+    ctx,
+    stripX,
+    mediaElements,
+    filteredFrames,
+    renderToken,
+    filterScale,
+  ));
+  if (!singleStrip) drawCombinedCenterBlend(ctx);
   const isPaper = appState.background === "paper";
   ctx.strokeStyle = isPaper ? "rgba(11,11,11,0.14)" : "rgba(255,255,255,0.08)";
   ctx.lineWidth = 1;
@@ -1326,13 +1603,14 @@ function nextAnimationFrame() {
   return new Promise((resolve) => window.requestAnimationFrame(resolve));
 }
 
-function loadPlaybackVideo(src) {
+function loadPlaybackVideo(src, mirrored = true) {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
     video.preload = "auto";
     video.muted = true;
     video.playsInline = true;
     video.loop = true;
+    video.dataset.mirror = String(mirrored);
     video.oncanplay = () => resolve(video);
     video.onerror = () => reject(new Error("A motion clip could not be loaded for export."));
     video.src = src;
@@ -1346,7 +1624,17 @@ function downloadExportBlob(blob, filename) {
   anchor.href = url;
   anchor.download = filename;
   anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  // iOS may keep reading the object URL after the download sheet appears.
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+async function requestExportWakeLock() {
+  if (!navigator.wakeLock?.request) return null;
+  try {
+    return await navigator.wakeLock.request("screen");
+  } catch {
+    return null;
+  }
 }
 
 async function exportStrip(type) {
@@ -1373,12 +1661,13 @@ async function exportStrip(type) {
     if (btnShare) {
       btnShare.disabled = isBusy;
       if (type === "share" && isBusy) btnShare.textContent = label;
-      else if (type === "share") btnShare.textContent = "Share";
+      else if (type === "share") btnShare.textContent = browserMayShareFiles() ? "Share photo" : "Save photo";
     }
   };
 
   try {
-    setBusy(true);
+    setFinishStatus("");
+    setBusy(true, type === "share" ? "Preparing photo…" : "Downloading...");
 
     if (type === "photo-double" || type === "photo-single" || type === "share") {
       const singleStrip = type === "photo-single";
@@ -1388,22 +1677,50 @@ async function exportStrip(type) {
         "image/jpeg",
         0.94,
       ));
+      canvas.width = 1;
+      canvas.height = 1;
 
       if (type === "share") {
         const file = new File([blob], `kisap-strip-${Date.now()}.jpg`, { type: "image/jpeg" });
-        await navigator.share({
-          title: 'My Kisap Photo Strip',
-          text: 'A moment, still moving.',
-          files: [file]
-        });
+        const canShareFile = typeof navigator.share === "function"
+          && typeof navigator.canShare === "function"
+          && navigator.canShare({ files: [file] });
+
+        if (canShareFile) {
+          try {
+            await navigator.share({
+              title: "My Kisap Photo Strip",
+              text: "A moment, still moving.",
+              files: [file],
+            });
+            setFinishStatus("Your Kisap is ready to share.", "success");
+          } catch (error) {
+            if (error?.name === "AbortError") {
+              setFinishStatus("Sharing cancelled. Your Kisap is still here.");
+              return;
+            }
+            downloadExportBlob(blob, file.name);
+            setFinishStatus("Sharing was unavailable, so Kisap saved the photo instead.", "success");
+          }
+        } else {
+          downloadExportBlob(blob, file.name);
+          setFinishStatus("File sharing is unavailable in this browser, so Kisap saved the photo instead.", "success");
+        }
       } else {
         const sizeLabel = singleStrip ? "single" : "double";
         downloadExportBlob(blob, `kisap-${sizeLabel}-strip-${Date.now()}.jpg`);
+        setFinishStatus(`${singleStrip ? "Single" : "Double"} strip saved to your device.`, "success");
       }
+      appState.recoveryAvailable = false;
+      queueRecoveryClear();
       playReadyChime();
       vibrate([20, 35, 20]);
     } else if (type === "motion") {
       if (!window.MediaRecorder) throw new Error("Video export is not supported in this browser.");
+
+      const profile = getMotionExportProfile();
+      let wakeLock = null;
+      const frameCache = new Map();
 
       const targetCanvas = document.createElement("canvas");
       targetCanvas.width = EXPORT_LAYOUT.singleWidth;
@@ -1412,18 +1729,18 @@ async function exportStrip(type) {
       if (typeof targetCanvas.captureStream !== "function") {
         throw new Error("Motion export is not supported in this browser.");
       }
-      const stream = targetCanvas.captureStream(MOTION_EXPORT_FPS);
+      const stream = targetCanvas.captureStream(profile.fps);
       const canvasTrack = stream.getVideoTracks()[0];
       if (canvasTrack?.applyConstraints) {
         try {
-          await canvasTrack.applyConstraints({ frameRate: MOTION_EXPORT_FPS });
+          await canvasTrack.applyConstraints({ frameRate: profile.fps });
         } catch {
           // Canvas tracks already use the requested rate in browsers without constraints support.
         }
       }
       let recorder;
       try {
-        recorder = createCompatibleVideoRecorder(stream, MOTION_EXPORT_BITRATE);
+        recorder = createCompatibleVideoRecorder(stream, profile.bitrate);
       } catch (error) {
         stream.getTracks().forEach((track) => track.stop());
         throw error;
@@ -1442,12 +1759,13 @@ async function exportStrip(type) {
       });
       recordingPromise.catch(() => {});
 
+      wakeLock = await requestExportWakeLock();
       setBusy(true, "Encoding video...");
       let videos = [];
       try {
         videos = await Promise.all(appState.moments.map((moment) => {
           if (!moment?.videoUrl) throw new Error("All four moments must be captured before motion export.");
-          return loadPlaybackVideo(moment.videoUrl);
+          return loadPlaybackVideo(moment.videoUrl, moment.mirrored);
         }));
         const photos = await Promise.all(appState.moments.map((moment) => {
           if (!moment?.stillUrl) throw new Error("All four moments must be captured before motion export.");
@@ -1456,12 +1774,18 @@ async function exportStrip(type) {
 
         videos.forEach((video) => { video.currentTime = 0; });
         await Promise.all(videos.map((video) => video.play()));
-        await generateCanvas(ctx, videos, true);
+        await generateCanvas(ctx, videos, true, {
+          frameCache,
+          filterScale: profile.filterScale,
+          renderToken: 0,
+        });
         await startVideoRecorder(recorder);
 
         const startedAt = performance.now();
-        const frameInterval = 1_000 / MOTION_EXPORT_FPS;
+        const frameInterval = 1_000 / profile.fps;
         let lastFrameAt = startedAt - frameInterval;
+        let lastProgress = -1;
+        let renderToken = 1;
         await new Promise((resolve, reject) => {
           const drawFrame = async (now) => {
             try {
@@ -1472,7 +1796,18 @@ async function exportStrip(type) {
               }
               if (now - lastFrameAt >= frameInterval) {
                 lastFrameAt = now;
-                await generateCanvas(ctx, elapsed < 9_000 ? videos : photos, true);
+                const progress = Math.min(99, Math.floor(elapsed / 100));
+                if (progress >= lastProgress + 2) {
+                  lastProgress = progress;
+                  setBusy(true, `Encoding ${progress}%`);
+                  setFinishStatus(`Preparing motion… ${progress}%`);
+                }
+                await generateCanvas(ctx, elapsed < 9_000 ? videos : photos, true, {
+                  frameCache,
+                  filterScale: profile.filterScale,
+                  renderToken,
+                });
+                renderToken += 1;
               }
               window.requestAnimationFrame(drawFrame);
             } catch (error) {
@@ -1482,7 +1817,13 @@ async function exportStrip(type) {
           window.requestAnimationFrame(drawFrame);
         });
 
-        await generateCanvas(ctx, photos, true);
+        setBusy(true, "Finishing video…");
+        setFinishStatus("Preparing motion… 100%");
+        await generateCanvas(ctx, photos, true, {
+          frameCache,
+          filterScale: 1,
+          renderToken,
+        });
         await nextAnimationFrame();
         await nextAnimationFrame();
         recorder.stop();
@@ -1490,6 +1831,9 @@ async function exportStrip(type) {
         const mimeType = blob.type || recorder.mimeType;
         const extension = recorderFileExtension(mimeType);
         downloadExportBlob(blob, `kisap-motion-${Date.now()}.${extension}`);
+        setFinishStatus("Motion strip saved to your device.", "success");
+        appState.recoveryAvailable = false;
+        queueRecoveryClear();
         playReadyChime();
         vibrate([20, 35, 20]);
       } finally {
@@ -1500,11 +1844,19 @@ async function exportStrip(type) {
           video.removeAttribute("src");
           video.load();
         });
+        frameCache.forEach((cached) => {
+          cached.frame.width = 1;
+          cached.frame.height = 1;
+        });
+        frameCache.clear();
+        targetCanvas.width = 1;
+        targetCanvas.height = 1;
+        wakeLock?.release?.().catch(() => {});
       }
     }
   } catch (err) {
     if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
-      alert("Failed to export: " + err.message);
+      setFinishStatus(`Kisap could not finish the export: ${err.message}`, "error");
     }
   } finally {
     setBusy(false);
@@ -1522,4 +1874,29 @@ function handleCaptureShortcut(event) {
 }
 
 document.addEventListener("keydown", handleCaptureShortcut);
-render();
+
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }, { once: true });
+}
+
+async function bootstrap() {
+  const stored = await loadSessionRecovery();
+  const restored = restoreRecoverySnapshot(stored);
+  appState.screen = getInitialScreen();
+
+  // Never reactivate a camera automatically after a refresh. Return recovered
+  // captures to review so the user remains in control of camera permission.
+  if (restored && appState.screen === "capture") {
+    appState.screen = recoveryResumeTarget();
+    window.history.replaceState(null, "", `#${appState.screen}`);
+    appState.notice = "Your private session was restored on this device.";
+  }
+  render();
+}
+
+bootstrap().catch(() => {
+  appState.screen = getInitialScreen();
+  render();
+});

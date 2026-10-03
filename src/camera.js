@@ -6,9 +6,17 @@ const GIF_INTERVAL = 250;
 const CAPTURE_DURATION = 10_000;
 const PHOTO_WIDTH = 1200;
 const PHOTO_HEIGHT = 800;
+const PHOTO_ASPECT_RATIO = PHOTO_WIDTH / PHOTO_HEIGHT;
 
 let cameraStream = null;
 let isCapturing = false;
+
+function trackShouldMirror(track) {
+  const settings = track?.getSettings?.() || {};
+  if (settings.facingMode === "environment") return false;
+  if (settings.facingMode === "user") return true;
+  return !/(back|rear|environment|world)/i.test(track?.label || "");
+}
 
 export function cameraIsActive() {
   return Boolean(cameraStream?.getVideoTracks().some((track) => track.readyState === "live"));
@@ -27,9 +35,16 @@ export async function startCamera(video, deviceId = null) {
 
   stopCamera();
   
+  // Ask for the same 3:2 shape used by the strip. Safari may choose a nearby
+  // native size, so captureStill() still uses a fit-safe draw as a fallback.
+  const preferredSize = {
+    width: { ideal: PHOTO_WIDTH },
+    height: { ideal: PHOTO_HEIGHT },
+    aspectRatio: { ideal: PHOTO_ASPECT_RATIO },
+  };
   const videoConstraints = deviceId
-    ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-    : { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } };
+    ? { deviceId: { exact: deviceId }, ...preferredSize }
+    : { facingMode: { ideal: "user" }, ...preferredSize };
 
   cameraStream = await navigator.mediaDevices.getUserMedia({
     video: videoConstraints,
@@ -63,6 +78,7 @@ export async function attachCamera(video) {
   video.muted = true;
   video.playsInline = true;
   if (video.srcObject !== stream) video.srcObject = stream;
+  video.dataset.mirror = String(trackShouldMirror(stream.getVideoTracks()[0]));
   await video.play();
   await waitForVideoFrame(video);
 }
@@ -128,7 +144,11 @@ export async function captureMoment(video, { onTick, onFinalStill, onEncoding, s
     const stillBlob = await captureStill(video);
     onEncoding?.();
     const videoBlob = await recordingPromise;
-    return { stillBlob, videoBlob };
+    return {
+      stillBlob,
+      videoBlob,
+      mirrored: video.dataset.mirror !== "false",
+    };
   } finally {
     window.clearInterval(countdownTimer);
     if (recorder.state !== "inactive") recorder.stop();
@@ -214,9 +234,15 @@ function drawVideoCover(context, video, outputWidth, outputHeight) {
   }
 
   context.save();
-  context.translate(outputWidth, 0);
-  context.scale(-1, 1);
-  context.drawImage(video, sx, sy, sw, sh, 0, 0, outputWidth, outputHeight);
+  context.fillStyle = "#050505";
+  context.fillRect(0, 0, outputWidth, outputHeight);
+  if (video.dataset.mirror !== "false") {
+    context.translate(outputWidth, 0);
+    context.scale(-1, 1);
+    context.drawImage(video, sx, sy, sw, sh, 0, 0, outputWidth, outputHeight);
+  } else {
+    context.drawImage(video, sx, sy, sw, sh, 0, 0, outputWidth, outputHeight);
+  }
   context.restore();
 }
 
