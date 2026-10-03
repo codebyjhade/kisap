@@ -1,4 +1,4 @@
-const CACHE_NAME = "kisap-shell-v1";
+const CACHE_NAME = "kisap-shell-v2";
 const APP_SHELL = [
   "/",
   "/favicon.svg",

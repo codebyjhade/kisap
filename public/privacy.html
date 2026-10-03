@@ -10,7 +10,7 @@
       @font-face { font-family: DM Mono; src: url('/fonts/DMMono-Regular.ttf') format('truetype'); font-weight: 400; font-display: swap; }
       :root { color-scheme: dark; --ink:#0b0b0b; --paper:#f4f1ea; --muted:#aaa79f; --line:rgba(244,241,234,.18); --signal:#ff4d3d; }
       * { box-sizing:border-box; }
-      body { margin:0; min-width:320px; min-height:100vh; background:var(--ink); color:var(--paper); font-family:Manrope,Arial,sans-serif; }
+      body { margin:0; min-width:320px; min-height:100vh; padding-top:env(safe-area-inset-top); padding-bottom:env(safe-area-inset-bottom); background:var(--ink); color:var(--paper); font-family:Manrope,Arial,sans-serif; }
       header, main, footer { width:min(100% - 40px, 880px); margin-inline:auto; }
       header { min-height:92px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); }
       .brand { color:var(--paper); font-size:2rem; font-weight:700; letter-spacing:-.08em; text-decoration:none; }

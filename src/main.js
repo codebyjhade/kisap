@@ -406,11 +406,21 @@ function homeScreen() {
       </section>
 
       <footer class="landing-footer">
-        <div class="landing-footer-content">
-          <div class="footer-brand">kisap<span class="signal-dot">.</span></div>
-          <p>A private, browser-based photo booth for four still and moving moments.</p>
-          <div class="footer-bottom">
-            <span>© ${new Date().getFullYear()} Kisap. Created by Bryan. All rights reserved.</span>
+        <div class="landing-footer-content footer-bottom">
+          <div class="footer-product">
+            <img src="/favicon.svg" alt="" width="42" height="42">
+            <div>
+              <strong>kisap<span class="signal-dot">.</span></strong>
+              <span>A private web photo booth.</span>
+            </div>
+          </div>
+          <p class="footer-credit">Built and designed by <strong>BRYAN JHADE EBUAN</strong></p>
+          <div class="footer-right">
+            <div class="footer-meta">
+              <span>© ${new Date().getFullYear()} Kisap</span>
+              <span aria-hidden="true">·</span>
+              <a href="https://github.com/codebyjhade/kisap" target="_blank" rel="noreferrer">Source on GitHub</a>
+            </div>
             <div class="footer-actions">
               <a class="text-button" href="/privacy.html">Privacy</a>
               <button class="button button--ghost footer-start" data-start-session>Start now</button>
